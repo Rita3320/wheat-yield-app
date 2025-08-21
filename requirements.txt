@@ -1,18 +1,7 @@
-# 基础框架
 streamlit==1.25.0
 streamlit-folium==0.14.0
-
-# 数据处理
 pandas==1.5.3
-numpy==1.23.5
-
-# 机器学习
-scikit-learn==1.2.2
-joblib==1.3.2
-
-# 可视化地图支持
-folium==0.14.0
-
-# 可选：导出功能支持
+numpy>=1.23.5
+scikit-learn==1.3.0
 matplotlib==3.7.2
-plotly==5.15.0
+shap==0.44.0
