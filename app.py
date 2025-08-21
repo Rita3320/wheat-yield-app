@@ -1,125 +1,183 @@
-import streamlit as st
-import pandas as pd
+# app.py  — Minimal, runnable Streamlit template (no external model required)
+
+import os
+import io
 import numpy as np
-import datetime
+import pandas as pd
+import streamlit as st
 import joblib
-import base64
-from io import BytesIO
-from sklearn.metrics import mean_squared_error, r2_score
-from sklearn.neighbors import BallTree
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
 
-# 加载模型
-model_global = joblib.load("model_global.pkl")
-model_hybrid = joblib.load("model_hybrid.pkl")
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LinearRegression
 
-st.set_page_config(page_title="Yield Prediction App", layout="wide")
-st.title("Wheat Yield Prediction App")
+# -----------------------------
+# Basic page config
+# -----------------------------
+st.set_page_config(page_title="Wheat Yield Prediction (Minimal)", layout="wide")
+st.title("Wheat Yield Prediction (Minimal Template)")
 
-st.sidebar.header("Prediction Mode")
-mode = st.sidebar.radio("Choose prediction mode:", ["Single Input", "Batch Upload"])
+REQUIRED_COLS = ["temperature", "humidity", "wind", "cluster"]  # numeric cluster: 0/1/2/3
 
-# 单个预测输入表单
-def single_input_form():
-    st.subheader("Enter Climate and Location Data")
-    temperature = st.number_input("Temperature (°C)", 10.0, 50.0, 25.0)
-    humidity = st.slider("Humidity (%)", 0, 100, 60)
-    wind = st.slider("Wind Speed (km/h)", 0, 50, 10)
-    cluster = st.selectbox("Climate Cluster", [0, 1, 2, 3])
 
-    if st.button("Predict Yield"):
-        input_data = pd.DataFrame({
-            "temperature": [temperature],
-            "humidity": [humidity],
-            "wind": [wind],
-            "cluster": [cluster]
-        })
+# -----------------------------
+# Model loading / fallback
+# -----------------------------
+@st.cache_resource
+def load_or_build_model():
+    """
+    Try to load model_global.pkl; if missing, train a tiny baseline model on synthetic data.
+    Returns a fitted sklearn Pipeline.
+    """
+    model_path = "model_global.pkl"
+    if os.path.exists(model_path):
+        try:
+            model = joblib.load(model_path)
+            return model, "loaded_from_file"
+        except Exception as e:
+            st.warning(f"Failed to load model_global.pkl, using fallback model. Detail: {e}")
 
-        pred_global = model_global.predict(input_data.drop(columns="cluster"))
-        pred_hybrid = model_hybrid.predict(input_data)
+    # Fallback model: fit on synthetic data (fast and small)
+    rng = np.random.RandomState(42)
+    n = 400
 
-        st.success("Prediction Results")
-        st.write("Global Model Prediction:", round(pred_global[0], 2), "tons/ha")
-        st.write("Hybrid Model (with cluster) Prediction:", round(pred_hybrid[0], 2), "tons/ha")
+    temp = rng.uniform(10, 40, size=n)          # °C
+    humi = rng.uniform(10, 95, size=n)          # %
+    wind = rng.uniform(0, 40, size=n)           # km/h
+    clus = rng.randint(0, 4, size=n)            # 0..3
+    # A simple synthetic target: linear-ish relation + noise
+    y = 0.08*temp + 0.015*humi - 0.03*wind + 0.5*clus + rng.normal(0, 0.3, size=n)
 
-        insight = f"Based on your input, the hybrid model predicts yield = {round(pred_hybrid[0], 2)} tons/ha in cluster {cluster}."
-        st.info(insight)
-
-        # PDF 下载按钮
-        if st.button("Download Prediction as PDF"):
-            pdf_bytes = generate_pdf_report(input_data, pred_global[0], pred_hybrid[0], insight)
-            st.download_button(label="Download PDF Report", data=pdf_bytes, file_name="yield_prediction.pdf")
-
-# 生成 PDF 报告
-def generate_pdf_report(input_data, pred_g, pred_h, insight):
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer)
-    styles = getSampleStyleSheet()
-    story = [
-        Paragraph("<b>Wheat Yield Prediction Report</b>", styles['Title']),
-        Spacer(1, 12),
-        Paragraph(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']),
-        Spacer(1, 12),
-        Paragraph("<b>Input Features:</b>", styles['Heading2'])
-    ]
-
-    for col in input_data.columns:
-        story.append(Paragraph(f"{col}: {input_data[col].iloc[0]}", styles['Normal']))
-
-    story.extend([
-        Spacer(1, 12),
-        Paragraph("<b>Prediction Results:</b>", styles['Heading2']),
-        Paragraph(f"Global Model: {round(pred_g, 2)} tons/ha", styles['Normal']),
-        Paragraph(f"Hybrid Model: {round(pred_h, 2)} tons/ha", styles['Normal']),
-        Spacer(1, 12),
-        Paragraph("<b>Insight:</b>", styles['Heading2']),
-        Paragraph(insight, styles['Normal'])
+    X = np.vstack([temp, humi, wind, clus]).T
+    pipe = Pipeline([
+        ("scaler", StandardScaler(with_mean=True, with_std=True)),
+        ("linreg", LinearRegression())
     ])
+    pipe.fit(X, y)
+    return pipe, "fallback_trained"
 
-    doc.build(story)
-    pdf = buffer.getvalue()
-    buffer.close()
-    return pdf
 
-# 批量上传预测
-def batch_upload_mode():
-    st.subheader("Upload CSV File for Batch Prediction")
-    template = pd.DataFrame({
-        "temperature": [25.0],
-        "humidity": [60],
-        "wind": [10],
-        "cluster": [0]
-    })
-    csv_buffer = BytesIO()
-    template.to_csv(csv_buffer, index=False)
-    st.download_button("Download Template CSV", data=csv_buffer.getvalue(), file_name="template.csv")
+model, model_source = load_or_build_model()
+st.caption(f"Model source: {model_source}")
 
-    uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
 
-    if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file)
-        if not set(["temperature", "humidity", "wind", "cluster"]).issubset(df.columns):
-            st.error("Missing required columns. Please use the template.")
-            return
+# -----------------------------
+# Utilities
+# -----------------------------
+def make_df_from_inputs(temperature, humidity, wind, cluster):
+    return pd.DataFrame(
+        [[float(temperature), float(humidity), float(wind), int(cluster)]],
+        columns=REQUIRED_COLS
+    )
 
-        pred_g = model_global.predict(df.drop(columns="cluster"))
-        pred_h = model_hybrid.predict(df)
+def predict_df(df: pd.DataFrame) -> np.ndarray:
+    # Ensure column order and numeric type
+    df = df.copy()
+    df = df[REQUIRED_COLS].apply(pd.to_numeric, errors="coerce")
+    if df[REQUIRED_COLS].isna().any().any():
+        raise ValueError("Found non-numeric values in required columns.")
+    X = df.values
+    return model.predict(X)
 
-        df_result = df.copy()
-        df_result["Global_Prediction"] = np.round(pred_g, 2)
-        df_result["Hybrid_Prediction"] = np.round(pred_h, 2)
-        df_result["Insight"] = df_result.apply(
-            lambda row: f"Hybrid predicts {row['Hybrid_Prediction']} tons/ha in cluster {row['cluster']}", axis=1)
 
-        st.success("Prediction completed.")
-        st.dataframe(df_result.style.format("{:.2f}"))
+# -----------------------------
+# Sidebar: mode selection
+# -----------------------------
+st.sidebar.header("Prediction Mode")
+mode = st.sidebar.radio("Choose:", ["Single Input", "Batch Upload"])
 
-        csv = df_result.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Results CSV", csv, file_name="batch_prediction_result.csv")
 
-# 主流程判断
+# -----------------------------
+# Session history
+# -----------------------------
+if "history" not in st.session_state:
+    st.session_state.history = pd.DataFrame(columns=REQUIRED_COLS + ["prediction"])
+
+
+# -----------------------------
+# Single input mode
+# -----------------------------
+def ui_single():
+    st.subheader("Single Prediction")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        temperature = st.number_input("Temperature (°C)", min_value= -20.0, max_value= 60.0, value=25.0, step=0.1)
+        humidity    = st.slider("Humidity (%)", min_value=0, max_value=100, value=60, step=1)
+    with c2:
+        wind        = st.slider("Wind Speed (km/h)", min_value=0, max_value=80, value=10, step=1)
+        cluster     = st.selectbox("Climate Cluster", options=[0, 1, 2, 3], index=0)
+
+    if st.button("Predict"):
+        try:
+            row = make_df_from_inputs(temperature, humidity, wind, cluster)
+            yhat = predict_df(row)[0]
+            st.success(f"Predicted yield: {yhat:.3f} tons/ha")
+
+            # append to history
+            row["prediction"] = yhat
+            st.session_state.history = pd.concat([st.session_state.history, row], ignore_index=True)
+        except Exception as e:
+            st.error(f"Prediction failed: {e}")
+
+    # history view and download
+    if not st.session_state.history.empty:
+        st.markdown("#### Prediction History")
+        st.dataframe(st.session_state.history, use_container_width=True)
+        csv_bytes = st.session_state.history.to_csv(index=False).encode("utf-8")
+        st.download_button("Download History CSV", data=csv_bytes, file_name="prediction_history.csv", mime="text/csv")
+
+
+# -----------------------------
+# Batch upload mode
+# -----------------------------
+@st.cache_data
+def template_csv_bytes():
+    tmp = pd.DataFrame(
+        {"temperature": [25.0], "humidity": [60], "wind": [10], "cluster": [0]}
+    )
+    buf = io.StringIO()
+    tmp.to_csv(buf, index=False)
+    return buf.getvalue().encode("utf-8")
+
+def ui_batch():
+    st.subheader("Batch Prediction")
+    st.download_button("Download Template CSV", data=template_csv_bytes(), file_name="template.csv", mime="text/csv")
+
+    up = st.file_uploader("Upload CSV with required columns: "
+                          + ", ".join(REQUIRED_COLS),
+                          type=["csv"])
+    if up is None:
+        return
+
+    try:
+        df = pd.read_csv(up)
+    except Exception as e:
+        st.error(f"Failed to read CSV: {e}")
+        return
+
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        st.error(f"Missing columns: {missing}")
+        return
+
+    try:
+        preds = predict_df(df)
+        out = df.copy()
+        out["prediction"] = np.round(preds, 3)
+        st.success("Batch prediction finished.")
+        st.dataframe(out, use_container_width=True)
+
+        csv_bytes = out.to_csv(index=False).encode("utf-8")
+        st.download_button("Download Results CSV", data=csv_bytes, file_name="batch_predictions.csv", mime="text/csv")
+    except Exception as e:
+        st.error(f"Batch prediction failed: {e}")
+
+
+# -----------------------------
+# Entry
+# -----------------------------
 if mode == "Single Input":
-    single_input_form()
+    ui_single()
 else:
-    batch_upload_mode()
+    ui_batch()
