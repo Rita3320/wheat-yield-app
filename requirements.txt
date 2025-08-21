@@ -15,3 +15,6 @@ streamlit-folium==0.17.5
 shap==0.44.1
 numba==0.59.1
 llvmlite==0.42.0
+
+streamlit-folium==0.17.5
+folium==0.17.0
