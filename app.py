@@ -8,9 +8,13 @@ from sklearn.metrics import mean_squared_error, r2_score
 from streamlit_folium import st_folium
 import folium
 
-# 可解释性
-import shap
-from streamlit_shap import st_shap
+try:
+    import shap
+    from streamlit_shap import st_shap
+    SHAP_AVAILABLE = True
+except Exception:
+    SHAP_AVAILABLE = False
+
 
 st.set_page_config(page_title="Wheat Yield Predictor Pro", layout="wide")
 
@@ -261,4 +265,5 @@ if mode == "Batch prediction (CSV)":
         st.download_button("Download predictions CSV",
             data=out.to_csv(index=False).encode("utf-8"),
             file_name="predictions.csv", mime="text/csv")
+
 
