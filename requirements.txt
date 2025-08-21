@@ -4,3 +4,7 @@ numpy>=1.23
 scikit-learn>=1.1
 xgboost>=1.7
 joblib>=1.2
+shap==0.44.1
+streamlit-shap==1.0.2
+folium==0.17.0
+streamlit-folium==0.17.5
