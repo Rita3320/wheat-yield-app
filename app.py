@@ -1,183 +1,146 @@
-# app.py  — Minimal, runnable Streamlit template (no external model required)
-
-import os
-import io
+# app.py
 import numpy as np
 import pandas as pd
 import streamlit as st
 import joblib
+from sklearn.neighbors import BallTree
+from sklearn.metrics import mean_squared_error, r2_score
 
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression
+st.set_page_config(page_title="Wheat Yield Predictor", layout="wide")
 
-# -----------------------------
-# Basic page config
-# -----------------------------
-st.set_page_config(page_title="Wheat Yield Prediction (Minimal)", layout="wide")
-st.title("Wheat Yield Prediction (Minimal Template)")
-
-REQUIRED_COLS = ["temperature", "humidity", "wind", "cluster"]  # numeric cluster: 0/1/2/3
-
-
-# -----------------------------
-# Model loading / fallback
-# -----------------------------
+# ---------- Loading ----------
 @st.cache_resource
-def load_or_build_model():
-    """
-    Try to load model_global.pkl; if missing, train a tiny baseline model on synthetic data.
-    Returns a fitted sklearn Pipeline.
-    """
-    model_path = "model_global.pkl"
-    if os.path.exists(model_path):
-        try:
-            model = joblib.load(model_path)
-            return model, "loaded_from_file"
-        except Exception as e:
-            st.warning(f"Failed to load model_global.pkl, using fallback model. Detail: {e}")
+def load_artifacts():
+    global_model = joblib.load("model_global_xgb.joblib")
+    specialists = joblib.load("model_specialists.joblib")  # dict: {cluster_id: model}
+    feat_list = joblib.load("feature_list.joblib")         # expected feature columns order
+    weather_ref = pd.read_csv("weather_ref.csv")           # city,year,cityLat,cityLon,climate_cluster
+    return global_model, specialists, feat_list, weather_ref
 
-    # Fallback model: fit on synthetic data (fast and small)
-    rng = np.random.RandomState(42)
-    n = 400
+global_model, specialists, FEATS, WEATHER_REF = load_artifacts()
 
-    temp = rng.uniform(10, 40, size=n)          # °C
-    humi = rng.uniform(10, 95, size=n)          # %
-    wind = rng.uniform(0, 40, size=n)           # km/h
-    clus = rng.randint(0, 4, size=n)            # 0..3
-    # A simple synthetic target: linear-ish relation + noise
-    y = 0.08*temp + 0.015*humi - 0.03*wind + 0.5*clus + rng.normal(0, 0.3, size=n)
+# ---------- Utils ----------
+def nearest_cluster(lat, lon, year, weather_df, max_year_span=3):
+    """Find nearest weather city in the same year; fall back to +/- years up to span."""
+    df = weather_df[weather_df["year"] == year]
+    if df.empty:
+        for span in range(1, max_year_span + 1):
+            df = weather_df[(weather_df["year"] >= year - span) & (weather_df["year"] <= year + span)]
+            if not df.empty:
+                break
+    if df.empty:
+        return np.nan, None
 
-    X = np.vstack([temp, humi, wind, clus]).T
-    pipe = Pipeline([
-        ("scaler", StandardScaler(with_mean=True, with_std=True)),
-        ("linreg", LinearRegression())
-    ])
-    pipe.fit(X, y)
-    return pipe, "fallback_trained"
+    pts = np.radians(df[["cityLat","cityLon"]].values)
+    tree = BallTree(pts, metric="haversine")
+    dist, idx = tree.query(np.radians([[lat, lon]]), k=1)
+    j = int(idx[0, 0])
+    row = df.iloc[j]
+    return int(row["climate_cluster"]), row["city"]
 
+def predict_hybrid(X_df: pd.DataFrame, cluster_vec: np.ndarray):
+    """Route to specialists where available and better; otherwise global."""
+    # Start with global predictions
+    yhat = global_model.predict(X_df[FEATS].values)
+    # Override by specialists that were selected in training
+    for cid, model in specialists.items():
+        mask = (cluster_vec == cid)
+        if np.any(mask):
+            yhat[mask] = model.predict(X_df.loc[mask, FEATS].values)
+    return yhat
 
-model, model_source = load_or_build_model()
-st.caption(f"Model source: {model_source}")
+def ensure_feature_frame(df_like: pd.DataFrame) -> pd.DataFrame:
+    """Ensure all expected columns exist and order matches FEATS."""
+    X = df_like.copy()
+    for c in FEATS:
+        if c not in X.columns:
+            X[c] = np.nan
+    X = X[FEATS]
+    # simple numeric fill (you can harden this if you later add encoders/scalers)
+    return X.astype(float).fillna(X.median(numeric_only=True))
 
+# ---------- UI ----------
+st.title("Wheat Yield per Hectare — Hybrid (Global + Specialists)")
 
-# -----------------------------
-# Utilities
-# -----------------------------
-def make_df_from_inputs(temperature, humidity, wind, cluster):
-    return pd.DataFrame(
-        [[float(temperature), float(humidity), float(wind), int(cluster)]],
-        columns=REQUIRED_COLS
-    )
+with st.sidebar:
+    st.header("Prediction Mode")
+    mode = st.radio("Select", ["Single prediction", "Batch prediction (CSV)"])
+    st.markdown("Expected features: **year, sown_area_hectare, cityLat, cityLon, climate_cluster**")
+    st.caption("If climate_cluster is not provided, the app can auto-detect by nearest weather city.")
 
-def predict_df(df: pd.DataFrame) -> np.ndarray:
-    # Ensure column order and numeric type
-    df = df.copy()
-    df = df[REQUIRED_COLS].apply(pd.to_numeric, errors="coerce")
-    if df[REQUIRED_COLS].isna().any().any():
-        raise ValueError("Found non-numeric values in required columns.")
-    X = df.values
-    return model.predict(X)
+# ---------- Single prediction ----------
+if mode == "Single prediction":
+    col1, col2 = st.columns(2)
+    with col1:
+        year = st.number_input("Year", min_value=1990, max_value=2100, value=2018, step=1)
+        sown_area = st.number_input("Sown area (hectare)", min_value=0.0, value=1000.0, step=10.0, format="%.3f")
+    with col2:
+        lat = st.number_input("Latitude (cityLat)", min_value=-90.0, max_value=90.0, value=34.75, step=0.01, format="%.6f")
+        lon = st.number_input("Longitude (cityLon)", min_value=-180.0, max_value=180.0, value=113.62, step=0.01, format="%.6f")
 
-
-# -----------------------------
-# Sidebar: mode selection
-# -----------------------------
-st.sidebar.header("Prediction Mode")
-mode = st.sidebar.radio("Choose:", ["Single Input", "Batch Upload"])
-
-
-# -----------------------------
-# Session history
-# -----------------------------
-if "history" not in st.session_state:
-    st.session_state.history = pd.DataFrame(columns=REQUIRED_COLS + ["prediction"])
-
-
-# -----------------------------
-# Single input mode
-# -----------------------------
-def ui_single():
-    st.subheader("Single Prediction")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        temperature = st.number_input("Temperature (°C)", min_value= -20.0, max_value= 60.0, value=25.0, step=0.1)
-        humidity    = st.slider("Humidity (%)", min_value=0, max_value=100, value=60, step=1)
-    with c2:
-        wind        = st.slider("Wind Speed (km/h)", min_value=0, max_value=80, value=10, step=1)
-        cluster     = st.selectbox("Climate Cluster", options=[0, 1, 2, 3], index=0)
+    auto_cluster = st.checkbox("Auto-detect climate cluster by nearest weather city", value=True)
+    cluster = None
+    nearest_city = None
+    if auto_cluster:
+        if st.button("Detect cluster"):
+            cluster, nearest_city = nearest_cluster(lat, lon, int(year), WEATHER_REF)
+            if np.isnan(cluster):
+                st.error("No weather reference found for this year/coords.")
+            else:
+                st.success(f"Detected cluster: {cluster} (nearest weather city: {nearest_city})")
+    else:
+        cluster = st.number_input("Climate cluster (integer)", min_value=0, value=0, step=1)
 
     if st.button("Predict"):
-        try:
-            row = make_df_from_inputs(temperature, humidity, wind, cluster)
-            yhat = predict_df(row)[0]
-            st.success(f"Predicted yield: {yhat:.3f} tons/ha")
+        if cluster is None or pd.isna(cluster):
+            cluster, nearest_city = nearest_cluster(lat, lon, int(year), WEATHER_REF)
+        X_row = pd.DataFrame([{
+            "year": year,
+            "sown_area_hectare": sown_area,
+            "cityLat": lat,
+            "cityLon": lon,
+            "climate_cluster": int(cluster) if cluster is not None else np.nan
+        }])
+        X_prepared = ensure_feature_frame(X_row)
+        yhat = predict_hybrid(X_prepared, np.array([int(cluster)]))
+        st.subheader(f"Predicted yield per hectare: {yhat[0]:.3f}")
 
-            # append to history
-            row["prediction"] = yhat
-            st.session_state.history = pd.concat([st.session_state.history, row], ignore_index=True)
-        except Exception as e:
-            st.error(f"Prediction failed: {e}")
+        # optional diagnostics
+        st.caption("Feature vector used:")
+        st.dataframe(X_prepared)
 
-    # history view and download
-    if not st.session_state.history.empty:
-        st.markdown("#### Prediction History")
-        st.dataframe(st.session_state.history, use_container_width=True)
-        csv_bytes = st.session_state.history.to_csv(index=False).encode("utf-8")
-        st.download_button("Download History CSV", data=csv_bytes, file_name="prediction_history.csv", mime="text/csv")
+# ---------- Batch prediction ----------
+if mode == "Batch prediction (CSV)":
+    st.write("Upload a CSV with columns: year, sown_area_hectare, cityLat, cityLon, [optional] climate_cluster")
+    up = st.file_uploader("Choose CSV", type=["csv"])
+    if up is not None:
+        df_in = pd.read_csv(up)
+        df_proc = df_in.copy()
 
+        # Assign cluster where missing
+        if "climate_cluster" not in df_proc.columns:
+            df_proc["climate_cluster"] = np.nan
 
-# -----------------------------
-# Batch upload mode
-# -----------------------------
-@st.cache_data
-def template_csv_bytes():
-    tmp = pd.DataFrame(
-        {"temperature": [25.0], "humidity": [60], "wind": [10], "cluster": [0]}
-    )
-    buf = io.StringIO()
-    tmp.to_csv(buf, index=False)
-    return buf.getvalue().encode("utf-8")
+        miss = df_proc["climate_cluster"].isna()
+        if miss.any():
+            st.info(f"Auto-detecting clusters for {miss.sum()} rows without climate_cluster...")
+            clusters = []
+            for (i, r) in df_proc.loc[miss, ["cityLat","cityLon","year"]].iterrows():
+                cc, _ = nearest_cluster(float(r["cityLat"]), float(r["cityLon"]), int(r["year"]), WEATHER_REF)
+                clusters.append((i, cc))
+            for i, cc in clusters:
+                df_proc.at[i, "climate_cluster"] = cc
 
-def ui_batch():
-    st.subheader("Batch Prediction")
-    st.download_button("Download Template CSV", data=template_csv_bytes(), file_name="template.csv", mime="text/csv")
+        # Prepare and predict
+        X_prepared = ensure_feature_frame(df_proc)
+        cluster_vec = df_proc["climate_cluster"].astype(int).values
+        yhat = predict_hybrid(X_prepared, cluster_vec)
 
-    up = st.file_uploader("Upload CSV with required columns: "
-                          + ", ".join(REQUIRED_COLS),
-                          type=["csv"])
-    if up is None:
-        return
+        out = df_in.copy()
+        out["pred_yield_per_hectare"] = yhat
+        st.success("Done.")
+        st.dataframe(out.head(20))
 
-    try:
-        df = pd.read_csv(up)
-    except Exception as e:
-        st.error(f"Failed to read CSV: {e}")
-        return
-
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:
-        st.error(f"Missing columns: {missing}")
-        return
-
-    try:
-        preds = predict_df(df)
-        out = df.copy()
-        out["prediction"] = np.round(preds, 3)
-        st.success("Batch prediction finished.")
-        st.dataframe(out, use_container_width=True)
-
-        csv_bytes = out.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Results CSV", data=csv_bytes, file_name="batch_predictions.csv", mime="text/csv")
-    except Exception as e:
-        st.error(f"Batch prediction failed: {e}")
-
-
-# -----------------------------
-# Entry
-# -----------------------------
-if mode == "Single Input":
-    ui_single()
-else:
-    ui_batch()
+        # Download
+        csv = out.to_csv(index=False).encode("utf-8")
+        st.download_button("Download predictions CSV", data=csv, file_name="predictions.csv", mime="text/csv")
