@@ -180,6 +180,8 @@ with tab2:
 # ---------- Cluster Plot Tab ----------
 with tab3:
     st.subheader("Cluster Distribution")
+
+    # 自定义颜色
     custom_colors = {
         "0": "#FF0000",  # 红
         "1": "#0066FF",  # 蓝
@@ -196,8 +198,9 @@ with tab3:
         mapbox_style="carto-positron",
         zoom=4,
         height=600,
-        color_discrete_map=custom_colors
+        color_discrete_map=custom_colors,
     )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 
@@ -208,5 +211,6 @@ with tab4:
         st.dataframe(pd.DataFrame(st.session_state.history))
     else:
         st.info("No predictions yet.")
+
 
 
