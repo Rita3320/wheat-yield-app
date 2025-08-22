@@ -1,27 +1,30 @@
 # app.py
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
 import joblib
 from sklearn.neighbors import BallTree
+import pydeck as pdk
+import plotly.express as px
 from sklearn.metrics import mean_squared_error, r2_score
 
+# ======= 0. 配置页面 =======
 st.set_page_config(page_title="Wheat Yield Predictor", layout="wide")
+st.title("Wheat Yield Prediction App")
 
-# ---------- Loading ----------
+# ======= 1. 加载资源 =======
 @st.cache_resource
 def load_artifacts():
-    global_model = joblib.load("model_global_xgb.joblib")
-    specialists = joblib.load("model_specialists.joblib")  # dict: {cluster_id: model}
-    feat_list = joblib.load("feature_list.joblib")         # expected feature columns order
-    weather_ref = pd.read_csv("weather_ref.csv")           # city,year,cityLat,cityLon,climate_cluster
-    return global_model, specialists, feat_list, weather_ref
+    model = joblib.load("model_global_xgb.joblib")
+    specialists = joblib.load("model_specialists.joblib")
+    feats = joblib.load("feature_list.joblib")
+    weather_df = pd.read_csv("weather_ref.csv")
+    return model, specialists, feats, weather_df
 
 global_model, specialists, FEATS, WEATHER_REF = load_artifacts()
 
-# ---------- Utils ----------
+# ======= 2. 工具函数 =======
 def nearest_cluster(lat, lon, year, weather_df, max_year_span=3):
-    """Find nearest weather city in the same year; fall back to +/- years up to span."""
     df = weather_df[weather_df["year"] == year]
     if df.empty:
         for span in range(1, max_year_span + 1):
@@ -34,15 +37,11 @@ def nearest_cluster(lat, lon, year, weather_df, max_year_span=3):
     pts = np.radians(df[["cityLat","cityLon"]].values)
     tree = BallTree(pts, metric="haversine")
     dist, idx = tree.query(np.radians([[lat, lon]]), k=1)
-    j = int(idx[0, 0])
-    row = df.iloc[j]
+    row = df.iloc[int(idx[0, 0])]
     return int(row["climate_cluster"]), row["city"]
 
 def predict_hybrid(X_df: pd.DataFrame, cluster_vec: np.ndarray):
-    """Route to specialists where available and better; otherwise global."""
-    # Start with global predictions
     yhat = global_model.predict(X_df[FEATS].values)
-    # Override by specialists that were selected in training
     for cid, model in specialists.items():
         mask = (cluster_vec == cid)
         if np.any(mask):
@@ -50,97 +49,99 @@ def predict_hybrid(X_df: pd.DataFrame, cluster_vec: np.ndarray):
     return yhat
 
 def ensure_feature_frame(df_like: pd.DataFrame) -> pd.DataFrame:
-    """Ensure all expected columns exist and order matches FEATS."""
     X = df_like.copy()
     for c in FEATS:
         if c not in X.columns:
             X[c] = np.nan
     X = X[FEATS]
-    # simple numeric fill (you can harden this if you later add encoders/scalers)
     return X.astype(float).fillna(X.median(numeric_only=True))
 
-# ---------- UI ----------
-st.title("Wheat Yield per Hectare — Hybrid (Global + Specialists)")
-
+# ======= 3. 页面导航栏 =======
 with st.sidebar:
-    st.header("Prediction Mode")
-    mode = st.radio("Select", ["Single prediction", "Batch prediction (CSV)"])
-    st.markdown("Expected features: **year, sown_area_hectare, cityLat, cityLon, climate_cluster**")
-    st.caption("If climate_cluster is not provided, the app can auto-detect by nearest weather city.")
+    st.header("Navigation")
+    page = st.radio("Go to:", ["Prediction", "Map", "Cluster Stats", "Charts"])
 
-# ---------- Single prediction ----------
-if mode == "Single prediction":
-    col1, col2 = st.columns(2)
-    with col1:
-        year = st.number_input("Year", min_value=1990, max_value=2100, value=2018, step=1)
-        sown_area = st.number_input("Sown area (hectare)", min_value=0.0, value=1000.0, step=10.0, format="%.3f")
-    with col2:
-        lat = st.number_input("Latitude (cityLat)", min_value=-90.0, max_value=90.0, value=34.75, step=0.01, format="%.6f")
-        lon = st.number_input("Longitude (cityLon)", min_value=-180.0, max_value=180.0, value=113.62, step=0.01, format="%.6f")
+# ======= 4. 页面：预测 =======
+if page == "Prediction":
+    st.subheader("Yield Prediction")
+    mode = st.radio("Mode", ["Single", "Batch (CSV)"])
 
-    auto_cluster = st.checkbox("Auto-detect climate cluster by nearest weather city", value=True)
-    cluster = None
-    nearest_city = None
-    if auto_cluster:
-        if st.button("Detect cluster"):
-            cluster, nearest_city = nearest_cluster(lat, lon, int(year), WEATHER_REF)
-            if np.isnan(cluster):
-                st.error("No weather reference found for this year/coords.")
-            else:
-                st.success(f"Detected cluster: {cluster} (nearest weather city: {nearest_city})")
+    if mode == "Single":
+        c1, c2 = st.columns(2)
+        with c1:
+            year = st.number_input("Year", 1990, 2100, 2020)
+            area = st.number_input("Sown Area (ha)", 0.0, 1e6, 1000.0)
+        with c2:
+            lat = st.number_input("Latitude", -90.0, 90.0, 35.0)
+            lon = st.number_input("Longitude", -180.0, 180.0, 115.0)
+
+        auto_cluster = st.checkbox("Auto detect cluster", value=True)
+        cluster = st.number_input("Cluster", 0, 9, 0) if not auto_cluster else None
+
+        if st.button("Predict"):
+            if auto_cluster:
+                cluster, nearest_city = nearest_cluster(lat, lon, year, WEATHER_REF)
+                st.info(f"Auto-detected cluster {cluster} (nearest: {nearest_city})")
+
+            X_row = pd.DataFrame([{"year": year, "sown_area_hectare": area, "cityLat": lat, "cityLon": lon, "climate_cluster": cluster}])
+            X_prepped = ensure_feature_frame(X_row)
+            yhat = predict_hybrid(X_prepped, np.array([cluster]))
+            st.success(f"Predicted yield: {yhat[0]:.2f} tons/ha")
+            st.caption("Feature input:")
+            st.dataframe(X_prepped)
+
     else:
-        cluster = st.number_input("Climate cluster (integer)", min_value=0, value=0, step=1)
+        st.write("Upload a CSV with columns: year, sown_area_hectare, cityLat, cityLon, [optional] climate_cluster")
+        up = st.file_uploader("CSV file", type="csv")
+        if up is not None:
+            df = pd.read_csv(up)
+            if "climate_cluster" not in df:
+                df["climate_cluster"] = [nearest_cluster(r["cityLat"], r["cityLon"], r["year"], WEATHER_REF)[0] for _, r in df.iterrows()]
+            X = ensure_feature_frame(df)
+            yhat = predict_hybrid(X, df["climate_cluster"].astype(int).values)
+            df["yield_pred"] = yhat
+            st.dataframe(df.head(20))
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button("Download CSV", csv, file_name="predicted_yield.csv")
 
-    if st.button("Predict"):
-        if cluster is None or pd.isna(cluster):
-            cluster, nearest_city = nearest_cluster(lat, lon, int(year), WEATHER_REF)
-        X_row = pd.DataFrame([{
-            "year": year,
-            "sown_area_hectare": sown_area,
-            "cityLat": lat,
-            "cityLon": lon,
-            "climate_cluster": int(cluster) if cluster is not None else np.nan
-        }])
-        X_prepared = ensure_feature_frame(X_row)
-        yhat = predict_hybrid(X_prepared, np.array([int(cluster)]))
-        st.subheader(f"Predicted yield per hectare: {yhat[0]:.3f}")
+# ======= 5. 页面：地图 =======
+elif page == "Map":
+    st.subheader("Weather City Map (colored by climate cluster)")
+    df_map = WEATHER_REF.copy()
+    year_sel = st.slider("Filter by year", int(df_map.year.min()), int(df_map.year.max()), int(df_map.year.max()))
+    df_map = df_map[df_map.year == year_sel]
 
-        # optional diagnostics
-        st.caption("Feature vector used:")
-        st.dataframe(X_prepared)
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df_map,
+        get_position='[cityLon, cityLat]',
+        get_color="[climate_cluster * 50, 100, 150]",
+        get_radius=8000,
+        pickable=True
+    )
+    st.pydeck_chart(pdk.Deck(
+        map_style='mapbox://styles/mapbox/light-v9',
+        initial_view_state=pdk.ViewState(
+            latitude=df_map.cityLat.mean(),
+            longitude=df_map.cityLon.mean(),
+            zoom=4,
+            pitch=0
+        ),
+        layers=[layer],
+        tooltip={"text": "City: {city}\nCluster: {climate_cluster}"}
+    ))
 
-# ---------- Batch prediction ----------
-if mode == "Batch prediction (CSV)":
-    st.write("Upload a CSV with columns: year, sown_area_hectare, cityLat, cityLon, [optional] climate_cluster")
-    up = st.file_uploader("Choose CSV", type=["csv"])
-    if up is not None:
-        df_in = pd.read_csv(up)
-        df_proc = df_in.copy()
+# ======= 6. 页面：聚类数量统计 =======
+elif page == "Cluster Stats":
+    st.subheader("Climate Cluster Distribution")
+    cluster_counts = WEATHER_REF.groupby("climate_cluster").city.nunique().reset_index(name="city_count")
+    fig = px.bar(cluster_counts, x="climate_cluster", y="city_count", color="climate_cluster", title="City count per cluster")
+    st.plotly_chart(fig)
 
-        # Assign cluster where missing
-        if "climate_cluster" not in df_proc.columns:
-            df_proc["climate_cluster"] = np.nan
-
-        miss = df_proc["climate_cluster"].isna()
-        if miss.any():
-            st.info(f"Auto-detecting clusters for {miss.sum()} rows without climate_cluster...")
-            clusters = []
-            for (i, r) in df_proc.loc[miss, ["cityLat","cityLon","year"]].iterrows():
-                cc, _ = nearest_cluster(float(r["cityLat"]), float(r["cityLon"]), int(r["year"]), WEATHER_REF)
-                clusters.append((i, cc))
-            for i, cc in clusters:
-                df_proc.at[i, "climate_cluster"] = cc
-
-        # Prepare and predict
-        X_prepared = ensure_feature_frame(df_proc)
-        cluster_vec = df_proc["climate_cluster"].astype(int).values
-        yhat = predict_hybrid(X_prepared, cluster_vec)
-
-        out = df_in.copy()
-        out["pred_yield_per_hectare"] = yhat
-        st.success("Done.")
-        st.dataframe(out.head(20))
-
-        # Download
-        csv = out.to_csv(index=False).encode("utf-8")
-        st.download_button("Download predictions CSV", data=csv, file_name="predictions.csv", mime="text/csv")
+# ======= 7. 页面：图像上传与展示 =======
+elif page == "Charts":
+    st.subheader("Upload Charts or Screenshots")
+    img_file = st.file_uploader("Upload PNG/JPG", type=["png", "jpg", "jpeg"])
+    if img_file is not None:
+        st.image(img_file, use_column_width=True)
+        st.caption("Click right-click > Save image if needed")
