@@ -178,6 +178,12 @@ with tab2:
     st.map(map_df.rename(columns={"cityLat": "lat", "cityLon": "lon"}))
 
 # ---------- Cluster Plot Tab ----------
+# 生成 plot_df（确保 WEATHER_REF 已加载）
+plot_df = WEATHER_REF.drop_duplicates(subset=["cityLat", "cityLon", "climate_cluster"]).copy()
+
+# 确保 climate_cluster 是字符串（便于自定义颜色分类）
+plot_df["climate_cluster"] = plot_df["climate_cluster"].astype(str)
+
 with tab3:
     st.subheader("Cluster Distribution")
 
@@ -211,6 +217,7 @@ with tab4:
         st.dataframe(pd.DataFrame(st.session_state.history))
     else:
         st.info("No predictions yet.")
+
 
 
 
