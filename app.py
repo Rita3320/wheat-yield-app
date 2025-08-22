@@ -87,7 +87,7 @@ def cluster_insight(cluster_id):
 # ---------- UI ----------
 st.title("Wheat Yield per Hectare — Hybrid Model")
 
-tab1, tab2, tab3, tab4 = st.tabs(["🔢 Predict", "🗺️ Climate Map", "📊 Cluster Plot", "📁 History"])
+tab1, tab2, tab3, tab4 = st.tabs(["Predict", "Climate Map", "Cluster Plot", "History"])
 
 # ---------- Prediction Tab ----------
 with tab1:
@@ -180,12 +180,27 @@ with tab2:
 # ---------- Cluster Plot Tab ----------
 with tab3:
     st.subheader("Cluster Distribution")
-    fig = px.scatter_mapbox(
-        WEATHER_REF.drop_duplicates(subset=["cityLat", "cityLon", "climate_cluster"]),
-        lat="cityLat", lon="cityLon", color="climate_cluster", hover_name="city",
-        mapbox_style="carto-positron", zoom=2, height=600
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    custom_colors = {
+    "0": "#FF0000",  # 红
+    "1": "#0066FF",  # 蓝
+    "2": "#00CC66",  # 绿
+    "3": "#FF9900",  # 橙
+}
+
+fig = px.scatter_mapbox(
+    plot_df,
+    lat="cityLat",
+    lon="cityLon",
+    color="climate_cluster",
+    hover_name="city",
+    mapbox_style="carto-positron",
+    zoom=4,
+    height=600,
+    color_discrete_map=custom_colors
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
 
 # ---------- History Tab ----------
 with tab4:
@@ -194,3 +209,4 @@ with tab4:
         st.dataframe(pd.DataFrame(st.session_state.history))
     else:
         st.info("No predictions yet.")
+
